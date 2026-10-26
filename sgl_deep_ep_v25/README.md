@@ -67,8 +67,11 @@ both `import deep_ep_v25` and a multi-GPU DeepEP or SGLang workload.
 ## Building from a checkout
 
 Initialize the DeepJIT submodule and install the build dependencies: the target
-CUDA 13 PyTorch build, a CUDA 13.1+ toolkit, NCCL 2.32.3+ with headers, ninja,
-setuptools, and wheel. NVSHMEM is not needed. Then run:
+CUDA 13 PyTorch build, a full CUDA 13.1+ toolkit (PyTorch's headers also need
+the cuBLAS, cuSPARSE, and cuSOLVER headers), NCCL 2.32.3+ with headers, the
+elfutils headers (`libdw-dev` or `elfutils-devel`; DeepJIT loads `libdw` at
+runtime only if present), ninja, setuptools, and wheel. NVSHMEM is not needed.
+Then run:
 
 ```bash
 git clone --recursive --branch sgl-deepep-v25 https://github.com/sgl-project/DeepEP.git

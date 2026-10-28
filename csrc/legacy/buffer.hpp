@@ -1637,7 +1637,8 @@ public:
                              int num_max_dispatch_tokens_per_rank,
                              int num_experts,
                              bool async,
-                             bool return_recv_hook) {
+                             bool return_recv_hook,
+                             bool swizzle_scales) {
         EP_HOST_ASSERT(low_latency_mode);
 
         // Tensor checks
@@ -1694,7 +1695,14 @@ public:
 
         // Allocate packed tensors
         auto packed_recv_x = torch::empty({num_local_experts, num_recv_tokens_per_expert, hidden / 2}, x.options());
-        auto packed_recv_x_scales = torch::empty({num_local_experts, num_recv_tokens_per_expert, hidden / 16}, x_scales.options());
+        torch::Tensor packed_recv_x_scales;
+        if (swizzle_scales) {
+            // Same physical layout as `use_nvfp4`: (l, rm, rk, 32, 4, 4), logical (32, 4, rm, 4, rk, l)
+            auto rm = ceil_div(num_recv_tokens_per_expert, 128), rk = hidden / 64;
+            packed_recv_x_scales = torch::empty({num_local_experts, rm, rk, 32, 4, 4}, x_scales.options()).permute({3, 4, 1, 5, 2, 0});
+        } else {
+            packed_recv_x_scales = torch::empty({num_local_experts, num_recv_tokens_per_expert, hidden / 16}, x_scales.options());
+        }
         auto packed_recv_per_token_scale = std::optional<torch::Tensor>();
         if (per_token_scale.has_value())
             packed_recv_per_token_scale = torch::empty({num_local_experts, num_recv_tokens_per_expert}, per_token_scale->options());
@@ -1741,7 +1749,8 @@ public:
                 true,
                 x_scales.data_ptr(),
                 per_token_scale.has_value() ? per_token_scale->data_ptr<float>() : nullptr,
-                packed_recv_per_token_scale.has_value() ? packed_recv_per_token_scale->data_ptr<float>() : nullptr);
+                packed_recv_per_token_scale.has_value() ? packed_recv_per_token_scale->data_ptr<float>() : nullptr,
+                swizzle_scales);
         };
         launcher(return_recv_hook ? LEGACY_LOW_LATENCY_SEND_PHASE : (LEGACY_LOW_LATENCY_SEND_PHASE | LEGACY_LOW_LATENCY_RECV_PHASE));
 

@@ -312,7 +312,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(void* packed_recv_x,
                                                     int phases,
                                                     const void* x_scales,
                                                     const float* per_token_scale,
-                                                    float* packed_recv_per_token_scale) {
+                                                    float* packed_recv_per_token_scale,
+                                                    bool swizzle_scales) {
     const auto sm_id = static_cast<int>(blockIdx.x);
     const auto thread_id = static_cast<int>(threadIdx.x);
     const auto warp_id = thread_id / 32, lane_id = get_lane_id();
@@ -647,12 +648,24 @@ LOW_LATENCY_DISPATCH_RECV:
 
             // Copy scales
             if constexpr (kUsePreQuantizedNVFP4) {
-                // Keep scales in the same linear layout as the input
                 const auto row = local_expert_idx * num_ranks * num_max_dispatch_tokens_per_rank + recv_token_begin_idx + i;
-                const auto src_scales = reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(src_data) + hidden_bytes);
-                const auto dst_scales = static_cast<int4*>(packed_recv_x_scales) + row * kNumPreQuantizedScaleInt4;
-                for (int j = lane_id; j < kNumPreQuantizedScaleInt4; j += 32)
-                    dst_scales[j] = ld_nc_global(src_scales + j);
+                if (swizzle_scales) {
+                    // Same layout as `use_nvfp4`: physical (l, rm, rk, 32, 4, 4), one 4-scale pack per int
+                    constexpr int kNumScalePacks = kHidden / 64;
+                    const auto token_idx = recv_token_begin_idx + i;
+                    const auto src_scales = reinterpret_cast<const int*>(reinterpret_cast<const uint8_t*>(src_data) + hidden_bytes);
+                    const auto dst_scales = static_cast<int*>(packed_recv_x_scales) +
+                        local_expert_idx * num_aligned_tokens * kNumScalePacks + (token_idx / 128) * kNumScalePacks * 128 +
+                        (token_idx % 32) * 4 + (token_idx % 128) / 32;
+                    for (int j = lane_id; j < kNumScalePacks; j += 32)
+                        st_na_global(dst_scales + j * 128, ld_nc_global(src_scales + j));
+                } else {
+                    // Keep scales in the same linear layout as the input
+                    const auto src_scales = reinterpret_cast<const int4*>(reinterpret_cast<const uint8_t*>(src_data) + hidden_bytes);
+                    const auto dst_scales = static_cast<int4*>(packed_recv_x_scales) + row * kNumPreQuantizedScaleInt4;
+                    for (int j = lane_id; j < kNumPreQuantizedScaleInt4; j += 32)
+                        dst_scales[j] = ld_nc_global(src_scales + j);
+                }
                 if (lane_id == 0 and packed_recv_per_token_scale != nullptr)
                     packed_recv_per_token_scale[row] = __int_as_float(ld_nc_global(src_src_idx + 1));
             } else if constexpr (kUseFP8) {
@@ -738,7 +751,8 @@ void dispatch(void* packed_recv_x,
               bool use_prequantized_nvfp4,
               const void* x_scales,
               const float* per_token_scale,
-              float* packed_recv_per_token_scale) {
+              float* packed_recv_per_token_scale,
+              bool swizzle_scales) {
     constexpr int kNumMaxTopK = 16;  // Kimi-K3 routes top-16
     const int num_warp_groups = ceil_div(num_experts, num_device_sms);
     const int num_warps_per_group = 32 / num_warp_groups;
@@ -803,7 +817,8 @@ void dispatch(void* packed_recv_x,
                       phases,                                \
                       x_scales,                              \
                       per_token_scale,                       \
-                      packed_recv_per_token_scale);          \
+                      packed_recv_per_token_scale,           \
+                      swizzle_scales);                       \
     }                                                        \
     break
 
